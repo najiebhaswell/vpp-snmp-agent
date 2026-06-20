@@ -4,6 +4,7 @@
 from vppstats import VPPStats
 from vppapi import VPPApi
 import sys
+import socket
 import yaml
 import agentx
 
@@ -91,6 +92,9 @@ class MyAgent(agentx.Agent):
 
         self.register("1.3.6.1.2.1.2.2.1")
         self.register("1.3.6.1.2.1.31.1.1.1")
+        self.register("1.3.6.1.2.1.4.20.1", priority=1)
+        self.register("1.3.6.1.2.1.55.1.8.1", priority=1)
+        self.register("1.3.6.1.2.1.4.34.1", priority=1)
 
         return True
 
@@ -124,9 +128,18 @@ class MyAgent(agentx.Agent):
                 % (num_ifaces, num_vppstat)
             )
 
+        swif_to_idx = {}
         for i in range(len(self.vppstat["/if/names"])):
             ifname = self.vppstat["/if/names"][i]
             idx = 1000 + i
+
+            # Skip linux-cp tap interfaces (host side of LCP pairs); we only want
+            # the native VPP interfaces visible in SNMP.
+            if ifname.startswith("tap"):
+                continue
+
+            if ifname in ifaces:
+                swif_to_idx[ifaces[ifname].sw_if_index] = idx
 
             ds.set("1.3.6.1.2.1.2.2.1.1.%u" % (idx), "int", idx)
 
@@ -360,6 +373,97 @@ class MyAgent(agentx.Agent):
             ds.set(
                 "1.3.6.1.2.1.31.1.1.1.19.%u" % (idx), "ticks", 0
             )  # Hardcode to Timeticks: (0) 0:00:00.00
+
+        # Populate ipAddrTable (1.3.6.1.2.1.4.20), indexed by IP address
+        ip_addresses = self.vpp.get_ip_addresses()
+        for sw_if_index, prefixes in ip_addresses.items():
+            snmp_idx = swif_to_idx.get(sw_if_index)
+            if snmp_idx is None:
+                continue
+            for prefix in prefixes:
+                try:
+                    ip_str = str(prefix.ip)
+                    netmask_str = str(prefix.network.netmask)
+                    oid_ip = ip_str
+                    self.logger.debug(
+                        "Adding IP %s/%s on ifIndex %d"
+                        % (ip_str, netmask_str, snmp_idx)
+                    )
+                    ds.set("1.3.6.1.2.1.4.20.1.1.%s" % oid_ip, "ip", socket.inet_aton(ip_str))
+                    ds.set("1.3.6.1.2.1.4.20.1.2.%s" % oid_ip, "int", snmp_idx)
+                    ds.set("1.3.6.1.2.1.4.20.1.3.%s" % oid_ip, "ip", socket.inet_aton(netmask_str))
+                    ds.set("1.3.6.1.2.1.4.20.1.4.%s" % oid_ip, "int", 1)
+                    ds.set("1.3.6.1.2.1.4.20.1.5.%s" % oid_ip, "int", 65535)
+                except Exception as e:
+                    self.logger.warning("Could not add IP address %s: %s" % (prefix, e))
+
+        # Populate ipv6AddrTable (1.3.6.1.2.1.55.1.8.1), indexed by ifIndex.16bytes
+        ipv6_addresses = self.vpp.get_ipv6_addresses()
+        for sw_if_index, prefixes in ipv6_addresses.items():
+            snmp_idx = swif_to_idx.get(sw_if_index)
+            if snmp_idx is None:
+                continue
+            for prefix in prefixes:
+                try:
+                    ip6_str = str(prefix.ip)
+                    prefix_len = prefix.network.prefixlen
+                    packed = prefix.ip.packed  # 16 bytes
+                    oid_addr = ".".join(str(b) for b in packed)
+                    oid_base = "1.3.6.1.2.1.55.1.8.1.%s.%d.%s"
+                    self.logger.debug(
+                        "Adding IPv6 %s/%d on ifIndex %d"
+                        % (ip6_str, prefix_len, snmp_idx)
+                    )
+                    ds.set(oid_base % ("1", snmp_idx, oid_addr), "str", packed)  # Ipv6Address = OCTET STRING (16)
+                    ds.set(oid_base % ("2", snmp_idx, oid_addr), "int", prefix_len)
+                    ds.set(oid_base % ("3", snmp_idx, oid_addr), "int", 1)  # unicast
+                    ds.set(oid_base % ("4", snmp_idx, oid_addr), "int", 2)  # anycast=false
+                    ds.set(oid_base % ("5", snmp_idx, oid_addr), "int", 1)  # preferred
+                except Exception as e:
+                    self.logger.warning("Could not add IPv6 address %s: %s" % (prefix, e))
+
+        # Populate IP-MIB ipAddressTable (1.3.6.1.2.1.4.34), the modern combined
+        # IPv4/IPv6 address table. LibreNMS (and other current NMS) read IPv6
+        # addresses from here, not from the deprecated IPV6-MIB above.
+        # Index: ipAddressAddrType.ipAddressAddr (length-prefixed InetAddress).
+        for sw_if_index, prefixes in list(ip_addresses.items()) + list(
+            ipv6_addresses.items()
+        ):
+            snmp_idx = swif_to_idx.get(sw_if_index)
+            if snmp_idx is None:
+                continue
+            for prefix in prefixes:
+                try:
+                    packed = prefix.ip.packed  # 4 bytes (v4) or 16 bytes (v6)
+                    addr_len = len(packed)
+                    inet_type = 1 if addr_len == 4 else 2  # ipv4(1) / ipv6(2)
+                    prefix_len = prefix.network.prefixlen
+                    addr_oid = ".".join(str(b) for b in packed)
+                    index = "%d.%d.%s" % (inet_type, addr_len, addr_oid)
+                    base = "1.3.6.1.2.1.4.34.1.%s." + index
+                    # ipAddressPrefix is a RowPointer into ipAddressPrefixTable;
+                    # the NMS reads the prefix length from its last sub-identifier.
+                    rowptr = "1.3.6.1.2.1.4.32.1.5.%d.%d.%d.%s.%d" % (
+                        snmp_idx,
+                        inet_type,
+                        addr_len,
+                        addr_oid,
+                        prefix_len,
+                    )
+                    self.logger.debug(
+                        "Adding ipAddressTable %s/%d on ifIndex %d"
+                        % (str(prefix.ip), prefix_len, snmp_idx)
+                    )
+                    ds.set(base % "3", "int", snmp_idx)  # ipAddressIfIndex
+                    ds.set(base % "4", "int", 1)  # ipAddressType = unicast
+                    ds.set(base % "5", "oid", rowptr)  # ipAddressPrefix (RowPointer)
+                    ds.set(base % "6", "int", 2)  # ipAddressOrigin = manual
+                    ds.set(base % "7", "int", 1)  # ipAddressStatus = preferred
+                except Exception as e:
+                    self.logger.warning(
+                        "Could not add ipAddressTable entry %s: %s" % (prefix, e)
+                    )
+
         return ds
 
 

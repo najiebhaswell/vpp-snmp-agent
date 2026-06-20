@@ -88,11 +88,12 @@ class Agent(object):
         # Override this
         pass
 
-    def register(self, oid_list):
+    def register(self, oid_list, priority=127):
         if not isinstance(oid_list, list):
             oid_list = [oid_list]
 
         for oid in oid_list:
-            if not oid in self._oid_list:
-                self.logger.debug("Adding %s to list" % oid)
-                self._oid_list.append(oid)
+            entry = (oid, priority)
+            if entry not in self._oid_list:
+                self.logger.debug("Adding %s to list (priority %d)" % (oid, priority))
+                self._oid_list.append(entry)

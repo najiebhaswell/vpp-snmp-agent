@@ -157,12 +157,24 @@ class Network:
         pdu = self.recv_pdu()
 
         logger.debug("==== Register PDU ====")
-        for oid in oid_list:
-            logger.info("Registering: %s" % (oid))
+        for item in oid_list:
+            if isinstance(item, tuple):
+                oid, priority = item
+            else:
+                oid, priority = item, 127
+            logger.info("Registering: %s (priority %d)" % (oid, priority))
             pdu = self.new_pdu(agentx.AGENTX_REGISTER_PDU)
             pdu.oid = oid
+            pdu.priority = priority
             self.send_pdu(pdu)
-            pdu = self.recv_pdu()
+            resp = self.recv_pdu()
+            if resp and hasattr(resp, "response"):
+                err = resp.response.get("error", 0)
+                if err != agentx.ERROR_NOAGENTXERROR:
+                    logger.error(
+                        "Registration of %s failed: %s"
+                        % (oid, agentx.ERROR_NAMES.get(err, err))
+                    )
 
         return
 

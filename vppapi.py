@@ -27,6 +27,8 @@ class VPPApi:
         self.vpp = None
         self.iface_dict = None
         self.lcp_dict = None
+        self.ip_addr_dict = None
+        self.ipv6_addr_dict = None
 
     def _sw_interface_event(self, event):
         # NOTE(pim): this callback runs in a background thread, so we just clear the
@@ -35,6 +37,8 @@ class VPPApi:
         logger.info(f"Clearing iface and LCP cache due to interface event")
         self.iface_dict = None
         self.lcp_dict = None
+        self.ip_addr_dict = None
+        self.ipv6_addr_dict = None
 
     def _event_callback(self, msg_type_name, msg_type):
         logger.debug(f"Received callback: {msg_type_name} => {msg_type}")
@@ -80,6 +84,8 @@ class VPPApi:
         self.vpp.disconnect()
         self.iface_dict = None
         self.lcp_dict = None
+        self.ip_addr_dict = None
+        self.ipv6_addr_dict = None
         self.connected = False
         return True
 
@@ -142,3 +148,59 @@ class VPPApi:
         self.lcp_dict = ret
         logger.debug(f"Caching LCPs: {ret}")
         return self.lcp_dict
+
+    def get_ip_addresses(self):
+        """Return dict {sw_if_index: list of IPv4Interface} for all VPP interfaces."""
+        ret = {}
+        if not self.connected and not self.connect():
+            logger.warning("Can't connect to VPP API")
+            return ret
+
+        if type(self.ip_addr_dict) is dict:
+            logger.debug("Returning cached IP addresses")
+            return self.ip_addr_dict
+
+        try:
+            logger.info("Requesting IPv4 addresses from VPP API")
+            for iface_name, iface in self.get_ifaces().items():
+                addrs = self.vpp.api.ip_address_dump(
+                    sw_if_index=iface.sw_if_index,
+                    is_ipv6=False,
+                )
+                if addrs:
+                    ret[iface.sw_if_index] = [addr.prefix for addr in addrs]
+        except Exception as e:
+            logger.error(f"Error getting IP addresses: {e}")
+            return ret
+
+        self.ip_addr_dict = ret
+        logger.debug(f"Caching IP addresses: {ret}")
+        return self.ip_addr_dict
+
+    def get_ipv6_addresses(self):
+        """Return dict {sw_if_index: list of IPv6Interface} for all VPP interfaces."""
+        ret = {}
+        if not self.connected and not self.connect():
+            logger.warning("Can't connect to VPP API")
+            return ret
+
+        if type(self.ipv6_addr_dict) is dict:
+            logger.debug("Returning cached IPv6 addresses")
+            return self.ipv6_addr_dict
+
+        try:
+            logger.info("Requesting IPv6 addresses from VPP API")
+            for iface_name, iface in self.get_ifaces().items():
+                addrs = self.vpp.api.ip_address_dump(
+                    sw_if_index=iface.sw_if_index,
+                    is_ipv6=True,
+                )
+                if addrs:
+                    ret[iface.sw_if_index] = [addr.prefix for addr in addrs]
+        except Exception as e:
+            logger.error(f"Error getting IPv6 addresses: {e}")
+            return ret
+
+        self.ipv6_addr_dict = ret
+        logger.debug(f"Caching IPv6 addresses: {ret}")
+        return self.ipv6_addr_dict

@@ -70,11 +70,11 @@ class PDU(object):
         return buf
 
     def encode_octet(self, octet):
-        octet = octet.encode("utf-8")
-        buf = struct.pack("!L", len(octet))
-        buf += octet
-        padding = (4 - (len(octet) % 4)) % 4
-        buf += chr(0).encode() * padding
+        data = octet if isinstance(octet, bytes) else octet.encode("utf-8")
+        buf = struct.pack("!L", len(data))
+        buf += data
+        padding = (4 - (len(data) % 4)) % 4
+        buf += b"\x00" * padding
         return buf
 
     def encode_value(self, type, name, value):
@@ -136,7 +136,7 @@ class PDU(object):
         elif self.type == agentx.AGENTX_REGISTER_PDU:
             range_subid = 0
             timeout = 5
-            priority = 127
+            priority = getattr(self, "priority", 127)
             buf += struct.pack("BBBB", timeout, priority, range_subid, 0)
             # Sub Tree
             buf += self.encode_oid(self.oid)
