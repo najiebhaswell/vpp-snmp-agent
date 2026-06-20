@@ -20,26 +20,73 @@ be single-threaded, greatly simplifying the design (and eliminating the need for
 
 To respect the original authors, this code is released with the same BSD 2-clause license.
 
+## What it exposes
+
+The agent registers the following MIB tables with snmpd over AgentX, populated
+by periodically polling VPP:
+
+* **IF-MIB** `ifTable` / `ifXTable` — one row per native VPP interface, with
+  32- and 64-bit counters, speed, MTU, MAC, and admin/oper status. Interfaces
+  are numbered from `ifIndex` 1000 upwards (`1000 +` the interface position in
+  the VPP stats segment).
+* **IP-MIB** `ipAddrTable` (IPv4, `1.3.6.1.2.1.4.20`) and the modern combined
+  `ipAddressTable` (IPv4 + IPv6, `1.3.6.1.2.1.4.34`) — the IP addresses
+  configured on each VPP interface, keyed back to its `ifIndex`. Current NMS
+  such as LibreNMS read IPv6 addresses from `ipAddressTable`.
+* **IPV6-MIB** `ipv6AddrTable` (`1.3.6.1.2.1.55.1.8.1`) — IPv6 addresses, for
+  older tooling that still uses this deprecated table.
+
+Only native VPP interfaces are exposed. The `linux-cp` host-side `tap`
+interfaces (the Linux mirror of each VPP interface) are deliberately skipped so
+they do not appear as duplicate interfaces in monitoring.
+
+> **Note on snmpd built-in modules.** Because the agent serves these tables
+> itself, the overlapping Net-SNMP built-in handlers must be disabled, or they
+> will shadow the agent's data (e.g. snmpd would otherwise serve the Linux
+> kernel interfaces of the netns, or its own `ipAddrTable`). See the
+> `-I -smux,ip,interface,ifTable,ifXTable,...` exclusion list in
+> `snmpd-dataplane.service`.
+
 ## Building
 
-Install `pyinstaller` to build a binary distribution
+The agent ships as a single self-contained binary built with
+[PyInstaller](https://pyinstaller.org/). Build it inside a virtualenv that has
+the runtime dependencies installed, so PyInstaller can discover and bundle them:
+
+```bash
+python3 -m venv venv
+./venv/bin/pip install pyinstaller pyyaml vpp_papi
+./venv/bin/pyinstaller --clean -y vpp-snmp-agent.spec
+```
+
+The resulting binary is written to `dist/vpp-snmp-agent`.
+
+> **Architecture & Python version.** PyInstaller does not cross-compile: build on
+> the same CPU architecture you will run on — an `arm64` binary will not run on
+> `amd64`, and vice-versa. The committed `vpp-snmp-agent.spec` pins
+> `hiddenimports=['libpython3.11']`; if your build host uses a different Python
+> (for example 3.12 on Debian 13 / Ubuntu 24.04), change that line to match
+> (`libpython3.12`, ...). The Python source itself is portable — only the
+> compiled binary is platform-specific.
+
+Run it on the console to see the available options:
 
 ```
-sudo pip install pyinstaller
-pyinstaller vpp-snmp-agent.py  --onefile
-
-## Run it on console
 dist/vpp-snmp-agent -h
-usage: vpp-snmp-agent [-h] [-a ADDRESS] [-p PERIOD] [-d]
+usage: vpp-snmp-agent [-h] [-a ADDRESS] [-p PERIOD] [-c CONFIG] [-d] [-dd]
 
-optional arguments:
+options:
   -h, --help  show this help message and exit
   -a ADDRESS  Location of the SNMPd agent (unix-path or host:port), default localhost:705
   -p PERIOD   Period to poll VPP, default 30 (seconds)
   -c CONFIG   Optional vppcfg YAML configuration file, default empty
   -d          Enable debug, default False
+  -dd         Enable AgentX protocol debug, default False
+```
 
 ## Install
+
+```
 sudo cp dist/vpp-snmp-agent /usr/sbin/
 ```
 
@@ -75,16 +122,14 @@ interfaces:
 ```
 
 This configuration file is completely optional. If the `-c` flag is empty, or it's set but the file does
-not exist, the Agent will simply enumerate all interfaces, and set the `ifAlias` OID to the same value as
-the `ifName`. However, if the config file is read, it will change the behavior as follows:
+not exist, the Agent will simply enumerate all native VPP interfaces, and set the `ifAlias` OID to the same
+value as the `ifName`. If the config file is read, the `ifAlias` OID for each interface is instead set to the
+matching `description` field from the configuration.
 
-*  The `ifAlias` OID for an interface will be set to the `description` field.
-*  Any `tapNN` interface names from VPP will be matched to their PHY by looking up their Linux Control Plane
-   interface:
-   *   The `ifName` field will be rewritten to the _LIP_ `host-if`, which is specified by the `lcp`
-       field. For example, `tap3` above will become `e0` while `tap3.20011` will become `e0.200.11`.
-   *   The `ifAlias` OID for a TAP will be set to the string `LCP ` followed by its PHY `ifName`. For example,
-       `e0.200.11` will become `LCP GigabitEthernet3/0/0.20011 (tap3)`
+The `linux-cp` host-side `tapNN` interfaces are not exported at all (see
+[What it exposes](#what-it-exposes)), so only the native VPP interfaces appear in SNMP, each annotated with
+its description. (Earlier versions of this agent rewrote `tapNN` names to their LCP `host-if` and showed them
+alongside the VPP interfaces; they are now hidden instead, to avoid duplicate interfaces in monitoring.)
 
 ## SNMPd config
 
