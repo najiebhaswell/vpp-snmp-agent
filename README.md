@@ -61,13 +61,12 @@ python3 -m venv venv
 
 The resulting binary is written to `dist/vpp-snmp-agent`.
 
-> **Architecture & Python version.** PyInstaller does not cross-compile: build on
-> the same CPU architecture you will run on — an `arm64` binary will not run on
-> `amd64`, and vice-versa. The committed `vpp-snmp-agent.spec` pins
-> `hiddenimports=['libpython3.11']`; if your build host uses a different Python
-> (for example 3.12 on Debian 13 / Ubuntu 24.04), change that line to match
-> (`libpython3.12`, ...). The Python source itself is portable — only the
-> compiled binary is platform-specific.
+> **Architecture.** PyInstaller does not cross-compile: build on the same CPU
+> architecture you will run on — an `arm64` binary will not run on `amd64`, and
+> vice-versa. The Python source itself is portable, so just clone and rebuild on
+> the target machine; only the compiled binary is platform-specific. PyInstaller
+> auto-detects and bundles the correct `libpython`, so no Python-version-specific
+> changes to `vpp-snmp-agent.spec` are needed.
 
 Run it on the console to see the available options:
 
